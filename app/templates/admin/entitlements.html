@@ -1,0 +1,39 @@
+{% extends "admin/base.html" %}
+{% block title %}Entitlements · PayBot admin{% endblock %}
+{% block content %}
+<h2>Entitlements</h2>
+<form method="get" action="/admin/entitlements">
+  <div class="grid">
+    <div><label>Account id</label><input name="account_id" value="{{ account_id }}"></div>
+    <div><label>Kind</label><input name="kind" value="{{ kind }}"></div>
+    <div><label>Status</label>
+      <select name="status">
+        <option value="">all</option>
+        {% for value in ['active', 'exhausted', 'expired', 'revoked'] %}
+        <option value="{{ value }}" {% if status == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+  <p><button type="submit">Filter</button></p>
+</form>
+<table>
+  <thead><tr><th>Entitlement</th><th>Service</th><th>Account</th><th>Kind</th><th>Remaining</th><th>Status</th><th>Order</th><th>Expires</th></tr></thead>
+  <tbody>
+  {% for item in entitlements %}
+    <tr>
+      <td class="muted">{{ item.id[:8] }}</td>
+      <td>{{ services.get(item.service_id).code if services.get(item.service_id) else item.service_id }}</td>
+      <td class="muted">{{ item.account_id[:8] }}</td>
+      <td>{{ item.kind }}</td>
+      <td>{{ item.remaining }} / {{ item.quantity }}</td>
+      <td>{{ item.status }}</td>
+      <td class="muted">{{ item.source_order_id[:8] }}</td>
+      <td class="muted">{{ item.expires_at or '—' }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="8" class="muted">No entitlements.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

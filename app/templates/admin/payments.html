@@ -1,0 +1,22 @@
+{% extends "admin/base.html" %}
+{% block title %}Payments · PayBot admin{% endblock %}
+{% block content %}
+<h2>Payment events</h2>
+<table>
+  <thead><tr><th>Time</th><th>Event key</th><th>Order</th><th>Service</th><th>Status</th><th>Payment</th></tr></thead>
+  <tbody>
+  {% for event in events %}
+    <tr>
+      <td class="muted">{{ event.created_at }}</td>
+      <td>{{ event.event_key.split(':')[0] }}:***</td>
+      <td class="muted">{{ event.order_id[:8] if event.order_id else '—' }}</td>
+      <td class="muted">{{ event.service_id[:8] if event.service_id else '—' }}</td>
+      <td>{{ event.status or '—' }}</td>
+      <td class="muted">{{ (event.payment_id[:6] ~ '…') if event.payment_id else '—' }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="muted">No payment events.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "admin/base.html" %}
+{% block title %}Services · PayBot admin{% endblock %}
+{% block content %}
+<h2>Services</h2>
+<table>
+  <thead><tr><th>Code</th><th>Name</th><th>Status</th><th>Fee bps</th><th>Products</th><th>Links</th></tr></thead>
+  <tbody>
+  {% for service in services %}
+    <tr>
+      <td><a href="/admin/services/{{ service.id }}">{{ service.code }}</a></td>
+      <td>{{ service.name }}</td>
+      <td>{{ service.status }}</td>
+      <td>{{ service.platform_fee_bps }}</td>
+      <td>{{ counts.get(service.id, 0) }}</td>
+      <td class="muted">{{ service.webapp_url or service.handoff_url or "—" }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="muted">No services yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% if session.role == 'platform_admin' %}
+<h3>Create service</h3>
+<form method="post" action="/admin/services">
+  <input type="hidden" name="csrf" value="{{ session.csrf }}">
+  <div class="grid">
+    <div><label>Code</label><input name="code" required pattern="[a-z0-9_]+"></div>
+    <div><label>Name</label><input name="name" required></div>
+    <div><label>Emoji</label><input name="emoji" maxlength="16"></div>
+    <div><label>Status</label>
+      <select name="status"><option value="draft">draft</option><option value="active">active</option><option value="disabled">disabled</option></select>
+    </div>
+    <div><label>Web app URL</label><input name="webapp_url" placeholder="https://..."></div>
+    <div><label>Handoff URL</label><input name="handoff_url" placeholder="https://..."></div>
+    <div><label>Events URL</label><input name="events_url" placeholder="https://..."></div>
+    <div><label>Events secret</label><input name="events_secret" type="password"></div>
+    <div><label>Terms URL</label><input name="terms_url" placeholder="https://..."></div>
+    <div><label>Privacy URL</label><input name="privacy_url" placeholder="https://..."></div>
+    <div><label>Support e-mail</label><input name="support_email" type="email"></div>
+    <div><label>Support URL</label><input name="support_url" placeholder="https://..."></div>
+    <div><label>Platform fee (bps)</label><input name="platform_fee_bps" type="number" value="0"></div>
+    <div><label>Sort order</label><input name="sort_order" type="number" value="0"></div>
+  </div>
+  <p><label>Description</label><textarea name="description"></textarea></p>
+  <button type="submit">Create service</button>
+</form>
+{% endif %}
+{% endblock %}

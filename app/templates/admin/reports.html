@@ -1,0 +1,35 @@
+{% extends "admin/base.html" %}
+{% block title %}Reports · PayBot admin{% endblock %}
+{% block content %}
+<h2>Revenue</h2>
+<table>
+  <thead><tr><th>Service</th><th>Paid orders</th><th>Gross ⭐</th><th>Platform fee ⭐</th><th>Service share ⭐</th><th>Refund orders</th><th>Refunded ⭐</th></tr></thead>
+  <tbody>
+  {% for row in report.rows %}
+    <tr>
+      <td>{{ row.service_name }} <span class="muted">({{ row.service_code }})</span></td>
+      <td>{{ row.orders }}</td>
+      <td>{{ row.gross_stars }}</td>
+      <td>{{ row.platform_fee_stars }}</td>
+      <td>{{ row.service_share_stars }}</td>
+      <td>{{ row.refund_orders }}</td>
+      <td>{{ row.refunded_stars }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="muted">No data.</td></tr>
+  {% endfor %}
+  </tbody>
+  <tfoot>
+    <tr>
+      <th>Total</th>
+      <th>{{ report.totals.orders }}</th>
+      <th>{{ report.totals.gross_stars }}</th>
+      <th>{{ report.totals.platform_fee_stars }}</th>
+      <th>{{ report.totals.service_share_stars }}</th>
+      <th>{{ report.totals.refund_orders }}</th>
+      <th>{{ report.totals.refunded_stars }}</th>
+    </tr>
+  </tfoot>
+</table>
+<p class="muted">CSV export: <a href="/admin/reports.csv">Download CSV</a></p>
+{% endblock %}

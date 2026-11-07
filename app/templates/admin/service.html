@@ -1,0 +1,101 @@
+{% extends "admin/base.html" %}
+{% block title %}{{ service.name }} · PayBot admin{% endblock %}
+{% block content %}
+{% if new_token %}<div class="ok">New API token (shown once): <code>{{ new_token }}</code></div>{% endif %}
+<h2>{{ service.emoji }} {{ service.name }} <span class="muted">({{ service.code }})</span></h2>
+
+<h3>Settings</h3>
+<form method="post" action="/admin/services/{{ service.id }}">
+  <input type="hidden" name="csrf" value="{{ session.csrf }}">
+  <div class="grid">
+    <div><label>Name</label><input name="name" value="{{ service.name }}" required></div>
+    <div><label>Emoji</label><input name="emoji" value="{{ service.emoji or '' }}"></div>
+    <div><label>Status</label>
+      <select name="status">
+        {% for value in ['draft', 'active', 'disabled'] %}
+        <option value="{{ value }}" {% if service.status == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div><label>Web app URL</label><input name="webapp_url" value="{{ service.webapp_url or '' }}"></div>
+    <div><label>Handoff URL</label><input name="handoff_url" value="{{ service.handoff_url or '' }}"></div>
+    <div><label>Events URL</label><input name="events_url" value="{{ service.events_url or '' }}"></div>
+    <div><label>Events secret</label><input name="events_secret" type="password" value="{{ service.events_secret or '' }}"></div>
+    <div><label>Terms URL</label><input name="terms_url" value="{{ service.terms_url or '' }}"></div>
+    <div><label>Privacy URL</label><input name="privacy_url" value="{{ service.privacy_url or '' }}"></div>
+    <div><label>Support e-mail</label><input name="support_email" value="{{ service.support_email or '' }}"></div>
+    <div><label>Support URL</label><input name="support_url" value="{{ service.support_url or '' }}"></div>
+    <div><label>Platform fee (bps)</label><input name="platform_fee_bps" type="number" value="{{ service.platform_fee_bps }}"></div>
+    <div><label>Sort order</label><input name="sort_order" type="number" value="{{ service.sort_order }}"></div>
+  </div>
+  <p><label>Description</label><textarea name="description">{{ service.description }}</textarea></p>
+  <button type="submit">Save service</button>
+</form>
+
+<h3>Products</h3>
+{% for product in products %}
+<form id="pf-{{ product.id }}" method="post" action="/admin/services/{{ service.id }}/products/{{ product.id }}">
+  <input type="hidden" name="csrf" value="{{ session.csrf }}">
+  <input type="hidden" name="description" value="{{ product.description }}">
+  <input type="hidden" name="sort_order" value="{{ product.sort_order }}">
+</form>
+{% endfor %}
+<table>
+  <thead><tr><th>Code</th><th>Name</th><th>Price ⭐</th><th>Kind</th><th>Qty</th><th>TTL days</th><th>Active</th><th></th></tr></thead>
+  <tbody>
+  {% for product in products %}
+    <tr>
+      <td>{{ product.code }}</td>
+      <td><input form="pf-{{ product.id }}" name="name" value="{{ product.name }}" required></td>
+      <td><input form="pf-{{ product.id }}" name="price_stars" type="number" min="1" value="{{ product.price_stars }}" required></td>
+      <td><input form="pf-{{ product.id }}" name="entitlement_kind" value="{{ product.entitlement_kind }}" required></td>
+      <td><input form="pf-{{ product.id }}" name="entitlement_quantity" type="number" min="1" value="{{ product.entitlement_quantity }}" required></td>
+      <td><input form="pf-{{ product.id }}" name="entitlement_ttl_days" type="number" min="1" value="{{ product.entitlement_ttl_days or '' }}"></td>
+      <td><input form="pf-{{ product.id }}" type="checkbox" name="active" {% if product.active %}checked{% endif %}></td>
+      <td><button form="pf-{{ product.id }}" type="submit">Save</button></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="8" class="muted">No products yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h3>Add product</h3>
+<form method="post" action="/admin/services/{{ service.id }}/products">
+  <input type="hidden" name="csrf" value="{{ session.csrf }}">
+  <div class="grid">
+    <div><label>Code</label><input name="code" required pattern="[a-z0-9_]+"></div>
+    <div><label>Name</label><input name="name" required></div>
+    <div><label>Price ⭐</label><input name="price_stars" type="number" min="1" required></div>
+    <div><label>Entitlement kind</label><input name="entitlement_kind" required></div>
+    <div><label>Quantity</label><input name="entitlement_quantity" type="number" min="1" value="1" required></div>
+    <div><label>TTL days (optional)</label><input name="entitlement_ttl_days" type="number" min="1"></div>
+    <div><label>Sort order</label><input name="sort_order" type="number" value="0"></div>
+  </div>
+  <p><label>Description</label><textarea name="description"></textarea></p>
+  <button type="submit">Create product</button>
+</form>
+
+{% if session.role == 'platform_admin' %}
+<h3>Service API tokens</h3>
+<table>
+  <thead><tr><th>ID</th><th>Scopes</th><th>Created</th><th>Revoked</th></tr></thead>
+  <tbody>
+  {% for token in tokens %}
+    <tr>
+      <td class="muted">{{ token.id[:8] }}</td>
+      <td>{{ token.scopes|join(', ') }}</td>
+      <td class="muted">{{ token.created_at }}</td>
+      <td class="muted">{{ token.revoked_at or '—' }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">No tokens yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<form method="post" action="/admin/services/{{ service.id }}/tokens">
+  <input type="hidden" name="csrf" value="{{ session.csrf }}">
+  <button type="submit">Issue token</button>
+</form>
+{% endif %}
+{% endblock %}

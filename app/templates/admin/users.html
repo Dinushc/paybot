@@ -1,0 +1,29 @@
+{% extends "admin/base.html" %}
+{% block title %}Users · PayBot admin{% endblock %}
+{% block content %}
+<h2>Users</h2>
+<form method="get" action="/admin/users">
+  <label>Search by e-mail, name, @username or Telegram id</label>
+  <input name="query" value="{{ query }}" size="40">
+  <button type="submit">Search</button>
+</form>
+<table>
+  <thead><tr><th>Account</th><th>Telegram id</th><th>Username</th><th>Name</th><th>E-mail</th><th>Locale</th><th>Blocked</th><th>Created</th></tr></thead>
+  <tbody>
+  {% for account, profile in rows %}
+    <tr>
+      <td class="muted">{{ account.id }}</td>
+      <td>{{ profile.telegram_user_id if profile else '—' }}</td>
+      <td>{{ ('@' ~ profile.username) if profile and profile.username else '—' }}</td>
+      <td>{{ account.name or '—' }}</td>
+      <td>{{ account.email or '—' }}</td>
+      <td>{{ account.locale }}</td>
+      <td>{{ 'yes' if account.is_blocked else 'no' }}</td>
+      <td class="muted">{{ account.created_at }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="8" class="muted">No users. Enter a search query.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

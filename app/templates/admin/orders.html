@@ -1,0 +1,42 @@
+{% extends "admin/base.html" %}
+{% block title %}Orders · PayBot admin{% endblock %}
+{% block content %}
+<h2>Orders</h2>
+<form method="get" action="/admin/orders">
+  <label>Status</label>
+  <select name="status">
+    <option value="">all</option>
+    {% for value in ['pending', 'paid', 'review', 'refunded', 'expired', 'failed'] %}
+    <option value="{{ value }}" {% if status == value %}selected{% endif %}>{{ value }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Filter</button>
+</form>
+<table>
+  <thead><tr><th>Order</th><th>Service</th><th>Product</th><th>Price ⭐</th><th>Status</th><th>Telegram user</th><th>Payment</th><th>Created</th><th></th></tr></thead>
+  <tbody>
+  {% for order in orders %}
+    <tr>
+      <td class="muted">{{ order.id }}</td>
+      <td>{{ services.get(order.service_id).code if services.get(order.service_id) else order.service_id }}</td>
+      <td>{{ products.get(order.product_id).name if products.get(order.product_id) else order.product_id }}</td>
+      <td>{{ order.price_stars }}</td>
+      <td>{{ order.status }}{% if order.review_reason %} <span class="muted">({{ order.review_reason }})</span>{% endif %}</td>
+      <td>{{ order.telegram_user_id or '—' }}</td>
+      <td class="muted">{{ (order.payment_id[:6] ~ '…') if order.payment_id else '—' }}</td>
+      <td class="muted">{{ order.created_at }}</td>
+      <td>
+        {% if order.status in ['paid', 'review'] %}
+        <form method="post" action="/admin/orders/{{ order.id }}/refund">
+          <input type="hidden" name="csrf" value="{{ session.csrf }}">
+          <button class="danger" type="submit">Refund</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="9" class="muted">No orders.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

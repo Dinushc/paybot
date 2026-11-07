@@ -1,0 +1,22 @@
+{% extends "admin/base.html" %}
+{% block title %}Audit · PayBot admin{% endblock %}
+{% block content %}
+<h2>Audit log</h2>
+<table>
+  <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Before</th><th>After</th></tr></thead>
+  <tbody>
+  {% for entry in entries %}
+    <tr>
+      <td class="muted">{{ entry.created_at }}</td>
+      <td>{{ entry.actor or '—' }}</td>
+      <td>{{ entry.action }}</td>
+      <td>{{ entry.entity_type }}:{{ entry.entity_id[:8] }}</td>
+      <td class="muted">{{ entry.before|tojson if entry.before else '—' }}</td>
+      <td class="muted">{{ entry.after|tojson if entry.after else '—' }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="muted">No audit entries.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
