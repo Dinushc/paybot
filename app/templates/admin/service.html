@@ -11,21 +11,43 @@
     <div><label>Name</label><input name="name" value="{{ service.name }}" required></div>
     <div><label>Emoji</label><input name="emoji" value="{{ service.emoji or '' }}"></div>
     <div><label>Status</label>
+      {% if session.role == 'platform_admin' %}
       <select name="status">
         {% for value in ['draft', 'active', 'disabled'] %}
         <option value="{{ value }}" {% if service.status == value %}selected{% endif %}>{{ value }}</option>
         {% endfor %}
       </select>
+      {% else %}
+      <span>{{ service.status }}</span>
+      {% endif %}
     </div>
     <div><label>Web app URL</label><input name="webapp_url" value="{{ service.webapp_url or '' }}"></div>
     <div><label>Handoff URL</label><input name="handoff_url" value="{{ service.handoff_url or '' }}"></div>
-    <div><label>Events URL</label><input name="events_url" value="{{ service.events_url or '' }}"></div>
-    <div><label>Events secret</label><input name="events_secret" type="password" value="{{ service.events_secret or '' }}"></div>
+    <div><label>Events URL</label>
+      {% if session.role == 'platform_admin' %}
+      <input name="events_url" value="{{ service.events_url or '' }}">
+      {% else %}
+      <span class="muted">{{ service.events_url or '—' }}</span>
+      {% endif %}
+    </div>
+    <div><label>Events secret</label>
+      {% if session.role == 'platform_admin' %}
+      <input name="events_secret" type="password" value="{{ service.events_secret or '' }}">
+      {% else %}
+      <span class="muted">{{ 'configured' if service.events_secret else 'not configured' }}</span>
+      {% endif %}
+    </div>
     <div><label>Terms URL</label><input name="terms_url" value="{{ service.terms_url or '' }}"></div>
     <div><label>Privacy URL</label><input name="privacy_url" value="{{ service.privacy_url or '' }}"></div>
     <div><label>Support e-mail</label><input name="support_email" value="{{ service.support_email or '' }}"></div>
     <div><label>Support URL</label><input name="support_url" value="{{ service.support_url or '' }}"></div>
-    <div><label>Platform fee (bps)</label><input name="platform_fee_bps" type="number" value="{{ service.platform_fee_bps }}"></div>
+    <div><label>Platform fee (bps)</label>
+      {% if session.role == 'platform_admin' %}
+      <input name="platform_fee_bps" type="number" value="{{ service.platform_fee_bps }}">
+      {% else %}
+      <span>{{ service.platform_fee_bps }}</span>
+      {% endif %}
+    </div>
     <div><label>Sort order</label><input name="sort_order" type="number" value="{{ service.sort_order }}"></div>
   </div>
   <p><label>Description</label><textarea name="description">{{ service.description }}</textarea></p>

@@ -99,7 +99,7 @@ class TelegramProfile(Base):
         ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
     )
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
-    username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     language_code: Mapped[str | None] = mapped_column(String(8), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
@@ -185,6 +185,7 @@ class Order(TimestampMixin, Base):
         UTCDateTime, nullable=True, index=True
     )
     paid_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    refund_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     refunded_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
@@ -203,8 +204,11 @@ class PaymentEvent(Base):
         BigInteger, unique=True, nullable=True
     )
     payment_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    payer_telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    refund_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    refunded_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
@@ -336,7 +340,7 @@ class BotUpdate(Base):
     update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     processed_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     result: Mapped[str] = mapped_column(String(16), default="processed")
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
 
 
 class AuditLog(Base):

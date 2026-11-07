@@ -8,7 +8,7 @@ import logging
 from datetime import timedelta
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app import metrics
@@ -20,6 +20,7 @@ from app.services.handoff import create_handoff
 log = logging.getLogger("app.outbox")
 
 NOTIFICATION = "notification.telegram"
+PROCESSING_TIMEOUT_SECONDS = 300
 
 
 def add_event(
@@ -152,6 +153,8 @@ def _deliver_service_event(db: Session, event: OutboxEvent) -> None:
     }
     if service.events_secret:
         headers["X-Platform-Signature"] = _signature(service.events_secret, body)
+    # Release the DB transaction before the network call.
+    db.commit()
     try:
         response = httpx.post(service.events_url, content=body, headers=headers, timeout=10.0)
     except httpx.HTTPError as exc:
@@ -171,12 +174,9 @@ class _PermanentError(RuntimeError):
     pass
 
 
-def _deliver_notification(db: Session, event: OutboxEvent, bot) -> None:
+def _send_prepared(bot, prepared: tuple[int | str, str, dict | None]) -> None:
     from app.telegram import TelegramError
 
-    prepared = message_for(db, event)
-    if prepared is None:
-        raise _PermanentError("notification payload is incomplete")
     chat_id, text, markup = prepared
     try:
         bot.send_message(chat_id, text, reply_markup=markup)
@@ -186,9 +186,29 @@ def _deliver_notification(db: Session, event: OutboxEvent, bot) -> None:
         raise _RetryableError(str(exc)) from exc
 
 
+def _prepare_notification(db: Session, event: OutboxEvent) -> tuple[int | str, str, dict | None]:
+    prepared = message_for(db, event)
+    if prepared is None:
+        raise _PermanentError("notification payload is incomplete")
+    return prepared
+
+
 def dispatch_once(db: Session, bot, *, limit: int = 50) -> dict:
-    """Deliver due events. Returns counters used by the worker and metrics."""
+    """Claim due events, deliver them outside the claim transaction, then persist.
+
+    Events are marked ``processing`` in a short transaction. Deliveries happen
+    without any row lock; each result is committed separately. A crashed worker
+    leaves ``processing`` rows that are reclaimed after ``PROCESSING_TIMEOUT``.
+    """
     now = utcnow()
+    db.execute(
+        update(OutboxEvent)
+        .where(
+            OutboxEvent.status == "processing",
+            OutboxEvent.next_attempt_at < now,
+        )
+        .values(status="pending", next_attempt_at=now)
+    )
     pending_count = db.execute(
         select(func.count()).select_from(OutboxEvent).where(OutboxEvent.status == "pending")
     ).scalar_one()
@@ -200,7 +220,7 @@ def dispatch_once(db: Session, bot, *, limit: int = 50) -> dict:
         metrics.gauge("outbox_lag_seconds", max(0.0, (now - oldest).total_seconds()))
 
     due_query = (
-        select(OutboxEvent)
+        select(OutboxEvent.id)
         .where(OutboxEvent.status == "pending", OutboxEvent.next_attempt_at <= now)
         .order_by(OutboxEvent.next_attempt_at)
         .limit(limit)
@@ -208,13 +228,30 @@ def dispatch_once(db: Session, bot, *, limit: int = 50) -> dict:
     dialect = db.bind.dialect.name if db.bind is not None else ""
     if dialect != "sqlite":
         due_query = due_query.with_for_update(skip_locked=True)
-    due = list(db.execute(due_query).scalars())
+    due_ids = list(db.execute(due_query).scalars())
+    if due_ids:
+        db.execute(
+            update(OutboxEvent)
+            .where(OutboxEvent.id.in_(due_ids), OutboxEvent.status == "pending")
+            .values(
+                status="processing",
+                next_attempt_at=now + timedelta(seconds=PROCESSING_TIMEOUT_SECONDS),
+            )
+        )
+    db.commit()
+
     stats = {"sent": 0, "retry": 0, "dead": 0}
-    for event in due:
+    for event_id in due_ids:
+        event = db.get(OutboxEvent, event_id)
+        if event is None or event.status != "processing":
+            continue
         try:
             if event.event_type == NOTIFICATION:
-                _deliver_notification(db, event, bot)
+                prepared = _prepare_notification(db, event)
+                db.commit()
+                _send_prepared(bot, prepared)
             else:
+                db.commit()
                 _deliver_service_event(db, event)
         except _PermanentError as exc:
             event.status = "failed"
@@ -230,6 +267,7 @@ def dispatch_once(db: Session, bot, *, limit: int = 50) -> dict:
                 stats["dead"] += 1
                 _notify_dead(db, event)
             else:
+                event.status = "pending"
                 event.next_attempt_at = utcnow() + _backoff(event.attempts)
                 stats["retry"] += 1
         except Exception as exc:  # pragma: no cover - defensive
@@ -239,7 +277,9 @@ def dispatch_once(db: Session, bot, *, limit: int = 50) -> dict:
             if event.attempts >= settings.outbox_max_attempts:
                 event.status = "dead"
                 stats["dead"] += 1
+                _notify_dead(db, event)
             else:
+                event.status = "pending"
                 event.next_attempt_at = utcnow() + _backoff(event.attempts)
                 stats["retry"] += 1
         else:
@@ -247,7 +287,7 @@ def dispatch_once(db: Session, bot, *, limit: int = 50) -> dict:
             event.sent_at = utcnow()
             event.last_error = None
             stats["sent"] += 1
-    db.flush()
+        db.commit()
     for key, value in stats.items():
         metrics.inc(f"outbox_{key}", value)
     return stats

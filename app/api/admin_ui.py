@@ -1,22 +1,21 @@
 """Server-rendered admin UI (sessions, CSRF, RBAC)."""
 from __future__ import annotations
 
-import csv
 import hmac
-import io
 import logging
 import time
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db import get_db
+from app.db import get_db, session_scope
 from app.ratelimit import SlidingWindowLimiter
 from app.models import (
     Account,
@@ -312,16 +311,17 @@ async def update_service_ui(service_id: str, request: Request, db: Session = Dep
     service.name = _form_str(form, "name", service.name)
     service.description = _form_str(form, "description", service.description)
     service.emoji = _form_str(form, "emoji") or None
-    service.status = _form_str(form, "status", service.status)
+    if session["role"] == "platform_admin":
+        service.status = _form_str(form, "status", service.status)
+        service.events_url = _form_opt(form, "events_url")
+        service.events_secret = _form_opt(form, "events_secret")
+        service.platform_fee_bps = _form_int(form, "platform_fee_bps", service.platform_fee_bps)
     service.webapp_url = _form_opt(form, "webapp_url")
     service.handoff_url = _form_opt(form, "handoff_url")
-    service.events_url = _form_opt(form, "events_url")
-    service.events_secret = _form_opt(form, "events_secret")
     service.terms_url = _form_opt(form, "terms_url")
     service.privacy_url = _form_opt(form, "privacy_url")
     service.support_email = _form_opt(form, "support_email")
     service.support_url = _form_opt(form, "support_url")
-    service.platform_fee_bps = _form_int(form, "platform_fee_bps", service.platform_fee_bps)
     service.sort_order = _form_int(form, "sort_order", service.sort_order)
     try:
         _validate_service(service)
@@ -532,12 +532,17 @@ async def refund_order_ui(order_id: str, request: Request, db: Session = Depends
         raise HTTPException(status_code=404, detail="order not found")
     if session["role"] == "service_admin" and order.service_id != session["service_id"]:
         raise HTTPException(status_code=403, detail="service scope mismatch")
-    from app.telegram import get_bot
+    def _refund() -> None:
+        from app.telegram import get_bot
+
+        with session_scope() as refund_db:
+            payments.refund_order(
+                refund_db, order_id=order_id, bot=get_bot(), actor=session["actor"]
+            )
 
     try:
-        payments.refund_order(db, order_id=order_id, bot=get_bot(), actor=session["actor"])
+        await run_in_threadpool(_refund)
     except DomainError as exc:
-        db.rollback()
         return _redirect("/admin/orders", error=exc.message)
     return _redirect("/admin/orders", notice="Refund completed")
 
@@ -551,7 +556,7 @@ def users_page(
         return redirect
     rows = []
     if query and query.strip():
-        like = f"%{query.strip()}%"
+        like = f"{query.strip()}%"
         statement = (
             select(Account, TelegramProfile)
             .outerjoin(TelegramProfile, TelegramProfile.account_id == Account.id)
@@ -621,8 +626,42 @@ def payments_page(request: Request, db: Session = Depends(get_db)):
         ).scalars()
     )
     return _render(
-        request, "admin/payments.html", {"session": session, "events": events}
+        request,
+        "admin/payments.html",
+        {
+            "session": session,
+            "events": events,
+            "refundable_statuses": {"duplicate_payment", "payer_mismatch", "unknown_order"},
+        },
     )
+
+
+@router.post("/payments/{event_id}/refund")
+async def refund_payment_event_ui(
+    event_id: str, request: Request, db: Session = Depends(get_db)
+):
+    session, redirect = _require(request, db, "orders:refund")
+    if redirect:
+        return redirect
+    form = await request.form()
+    _check_csrf(request, session, form)
+    event = db.get(PaymentEvent, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="payment event not found")
+
+    def _refund() -> None:
+        from app.telegram import get_bot
+
+        with session_scope() as refund_db:
+            payments.refund_payment_event(
+                refund_db, event_id=event_id, bot=get_bot(), actor=session["actor"]
+            )
+
+    try:
+        await run_in_threadpool(_refund)
+    except DomainError as exc:
+        return _redirect("/admin/payments", error=exc.message)
+    return _redirect("/admin/payments", notice="Payment refunded")
 
 
 @router.get("/audit", response_class=HTMLResponse)
@@ -653,31 +692,4 @@ def reports_csv(request: Request, db: Session = Depends(get_db)):
         return redirect
     service_id = session["service_id"] if session["role"] == "service_admin" else None
     report = reports.revenue(db, service_id=service_id)
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(
-        [
-            "service_code",
-            "service_name",
-            "orders",
-            "gross_stars",
-            "platform_fee_stars",
-            "service_share_stars",
-            "refund_orders",
-            "refunded_stars",
-        ]
-    )
-    for row in report["rows"]:
-        writer.writerow(
-            [
-                row["service_code"],
-                row["service_name"],
-                row["orders"],
-                row["gross_stars"],
-                row["platform_fee_stars"],
-                row["service_share_stars"],
-                row["refund_orders"],
-                row["refunded_stars"],
-            ]
-        )
-    return Response(buffer.getvalue(), media_type="text/csv")
+    return Response(reports.revenue_csv(report), media_type="text/csv")

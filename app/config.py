@@ -6,6 +6,11 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 DEFAULT_SECRET = "dev-secret-change-me"
+PLACEHOLDER_SECRETS = {
+    "dev-secret-change-me",
+    "change-me",
+    "change-me-change-me-change-me-change-me",
+}
 SUPPORTED_LANGUAGES = ("ru", "en", "es", "fa", "uz", "sah")
 
 
@@ -91,8 +96,10 @@ class Settings:
         base = urlparse(self.public_base_url)
         if base.scheme != "https" or not base.netloc:
             issues.append("PUBLIC_BASE_URL must be an absolute https URL in production")
-        if self.secret_key == DEFAULT_SECRET or len(self.secret_key) < 32:
+        if self.secret_key in PLACEHOLDER_SECRETS or len(self.secret_key) < 32:
             issues.append("SECRET_KEY must be a random value of at least 32 characters")
+        if self.auto_create_tables:
+            issues.append("AUTO_CREATE_TABLES must be off in production: use alembic upgrade head")
         if self.telegram_enabled and not self.telegram_webhook_secret.strip():
             issues.append(
                 "TELEGRAM_WEBHOOK_SECRET is empty but TELEGRAM_BOT_TOKEN is set: "
@@ -138,7 +145,7 @@ settings = Settings(
     handoff_ttl_seconds=_int("HANDOFF_TTL_SECONDS", 60),
     init_data_ttl_seconds=_int("INIT_DATA_TTL_SECONDS", 300),
     workers_enabled=_bool("WORKERS_ENABLED", True),
-    auto_create_tables=_bool("AUTO_CREATE_TABLES", True),
+    auto_create_tables=_bool("AUTO_CREATE_TABLES", False),
     outbox_interval_seconds=_int("OUTBOX_INTERVAL_SECONDS", 5),
     outbox_max_attempts=_int("OUTBOX_MAX_ATTEMPTS", 8),
     order_expiry_interval_seconds=_int("ORDER_EXPIRY_INTERVAL_SECONDS", 60),

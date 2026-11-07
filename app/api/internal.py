@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Account, InitDataUse, Order, ServiceProduct
-from app.security import SecurityError, sha256_hex, validate_init_data
+from app.security import SecurityError, init_data_replay_key, validate_init_data
 from app.schemas import (
     ConsumeRequest,
     HandoffExchangeRequest,
@@ -177,7 +177,7 @@ def verify_init_data_endpoint(
     user = data.get("user") if isinstance(data.get("user"), dict) else {}
     telegram_id = user.get("id")
     account = get_by_telegram_id(db, telegram_id) if telegram_id else None
-    digest = sha256_hex(body.init_data)
+    digest = init_data_replay_key(body.init_data)
     if db.get(InitDataUse, digest) is not None:
         raise DomainError("init_data_replayed", "initData was already used", status_code=401)
     try:

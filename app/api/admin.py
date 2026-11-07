@@ -1,8 +1,6 @@
 """Admin API: services, products, orders, refunds, entitlements, audit, reports."""
 from __future__ import annotations
 
-import csv
-import io
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
@@ -46,6 +44,19 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 SERVICE_STATUSES = {"draft", "active", "disabled"}
 ORDER_STATUSES = {"pending", "paid", "review", "refunded", "expired", "failed"}
+SERVICE_ADMIN_FIELDS = {
+    "name",
+    "description",
+    "emoji",
+    "webapp_url",
+    "handoff_url",
+    "terms_url",
+    "privacy_url",
+    "support_email",
+    "support_url",
+    "sort_order",
+    "translations",
+}
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -241,6 +252,14 @@ def update_service(
     _ensure_service_scope(key, service.id)
     before = _service_dict(service)
     changes = body.model_dump(exclude_unset=True)
+    if key.role == "service_admin":
+        forbidden = set(changes) - SERVICE_ADMIN_FIELDS
+        if forbidden:
+            raise DomainError(
+                "forbidden",
+                "service admins cannot change: " + ", ".join(sorted(forbidden)),
+                status_code=403,
+            )
     if "code" in changes and changes["code"] != service.code:
         if db.execute(select(Service).where(Service.code == changes["code"])).scalar_one_or_none():
             raise ConflictError("service code is already in use", code="duplicate_code")
@@ -411,7 +430,11 @@ def refund_order_api(
         raise NotFoundError("order not found")
     _ensure_service_scope(key, order.service_id)
     result = payments.refund_order(
-        db, order_id=order_id, bot=get_bot(), actor=_actor(key)
+        db,
+        order_id=order_id,
+        bot=get_bot(),
+        actor=_actor(key),
+        reason=body.reason if body else None,
     )
     return result
 
@@ -483,12 +506,37 @@ def list_payment_events(
                 "service_id": item.service_id,
                 "event_key": item.event_key.split(":", 1)[0] + ":***",
                 "payment_id": (item.payment_id[:6] + "…") if item.payment_id else None,
+                "payer_telegram_id": item.payer_telegram_id,
                 "status": item.status,
+                "refunded_at": _iso(item.refunded_at),
                 "created_at": _iso(item.created_at),
             }
             for item in items
         ]
     }
+
+
+@router.post("/payment-events/{event_id}/refund")
+def refund_payment_event_api(
+    event_id: str,
+    body: RefundRequest | None = None,
+    key: AdminApiKey = Depends(admin_auth("orders:refund")),
+    db: Session = Depends(get_db),
+):
+    from app.telegram import get_bot
+
+    event = db.get(PaymentEvent, event_id)
+    if event is None:
+        raise NotFoundError("payment event not found")
+    if key.role == "service_admin" and event.service_id != key.service_id:
+        raise DomainError("forbidden", "service scope mismatch", status_code=403)
+    return payments.refund_payment_event(
+        db,
+        event_id=event_id,
+        bot=get_bot(),
+        actor=_actor(key),
+        reason=body.reason if body else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -564,7 +612,7 @@ def search_users(
     key: AdminApiKey = Depends(admin_auth("users:read")),
     db: Session = Depends(get_db),
 ):
-    like = f"%{query.strip()}%"
+    like = f"{query.strip()}%"
     statement = (
         select(Account, TelegramProfile)
         .outerjoin(TelegramProfile, TelegramProfile.account_id == Account.id)
@@ -609,8 +657,8 @@ def anonymize_user(
     if account is None:
         raise NotFoundError("account not found")
     before = {
-        "email": account.email,
-        "name": account.name,
+        "email_present": bool(account.email),
+        "name_present": bool(account.name),
         "is_blocked": account.is_blocked,
         "deleted_at": _iso(account.deleted_at),
     }
@@ -673,34 +721,7 @@ def revenue_report(
         db, date_from=date_from, date_to=date_to, service_id=service_id
     )
     if fmt == "csv":
-        buffer = io.StringIO()
-        writer = csv.writer(buffer)
-        writer.writerow(
-            [
-                "service_code",
-                "service_name",
-                "orders",
-                "gross_stars",
-                "platform_fee_stars",
-                "service_share_stars",
-                "refund_orders",
-                "refunded_stars",
-            ]
-        )
-        for row in report["rows"]:
-            writer.writerow(
-                [
-                    row["service_code"],
-                    row["service_name"],
-                    row["orders"],
-                    row["gross_stars"],
-                    row["platform_fee_stars"],
-                    row["service_share_stars"],
-                    row["refund_orders"],
-                    row["refunded_stars"],
-                ]
-            )
-        return Response(buffer.getvalue(), media_type="text/csv")
+        return Response(reports.revenue_csv(report), media_type="text/csv")
     return report
 
 

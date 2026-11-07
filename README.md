@@ -66,12 +66,13 @@ curl -sS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
 ## Production
 
 ```bash
-alembic upgrade head
+alembic upgrade head        # once, before starting replicas
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 python -m app.worker        # separate process; keep API WORKERS_ENABLED=0
 ```
 
-`docker compose up -d --build` runs PostgreSQL, the API and a single worker.
+`docker compose up -d --build` runs PostgreSQL, a one-shot `migrate` service,
+the API and a single worker. Migrations are never executed by API replicas.
 The app refuses to start in production when:
 
 - `PUBLIC_BASE_URL` is not HTTPS,
@@ -94,6 +95,7 @@ See [`.env.example`](.env.example). Key variables:
 | `ALLOW_LATE_PAYMENT` / `LATE_PAYMENT_MAX_MINUTES` | Late Stars payment policy |
 | `HANDOFF_TTL_SECONDS` / `INIT_DATA_TTL_SECONDS` | Handoff/Mini App token TTL |
 | `WORKERS_ENABLED` | Run the background worker inside this process |
+| `AUTO_CREATE_TABLES` | Dev-only `create_all`; must be off in production |
 | `OUTBOX_MAX_ATTEMPTS` | Retries before a service event is dead |
 | `WEBHOOK_RATE_LIMIT_PER_MINUTE` | In-process webhook rate limit |
 
@@ -135,6 +137,8 @@ consume another service's access. Errors: `402 insufficient_entitlement`,
 Admin refund calls `refundStarPayment`, marks the order `refunded`, revokes only
 the unused remainder of the entitlement and emits `order.refunded`. If Telegram
 fails, the order stays `paid` and access is untouched so the operator can retry.
+Review/duplicate charges that are deliberately not attached to the order remain
+refundable to the actual payer via `POST /api/admin/payment-events/{id}/refund`.
 
 ## Admin API
 
@@ -147,6 +151,7 @@ GET             /api/admin/orders
 POST            /api/admin/orders/{id}/refund
 POST            /api/admin/orders/{id}/resolve?action=mark_paid|refund
 GET             /api/admin/payment-events
+POST            /api/admin/payment-events/{id}/refund
 GET             /api/admin/entitlements
 POST            /api/admin/entitlements/{id}/adjust
 GET             /api/admin/users?query=...

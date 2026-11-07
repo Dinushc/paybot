@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from sqlalchemy import select
 
 from app.db import session_scope
-from app.models import Entitlement, Order, OutboxEvent
+from app.models import Entitlement, Order, OutboxEvent, utcnow
 from app.telegram import TelegramError
 from tests.conftest import ADMIN_HEADERS
 from tests.helpers import buy_and_pay, grant_access, make_account, make_catalog, make_service_token
@@ -80,3 +82,25 @@ def test_second_refund_conflicts(client, fake_bot):
     )
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "already_refunded"
+
+
+def test_refund_report_uses_refund_date(client, fake_bot):
+    catalog = make_catalog(price=10)
+    paid = buy_and_pay(client, catalog)
+    with session_scope() as db:
+        order = db.get(Order, paid["order_id"])
+        order.paid_at = utcnow() - timedelta(days=10)
+    resp = client.post(
+        f"/api/admin/orders/{paid['order_id']}/refund", json={}, headers=ADMIN_HEADERS
+    )
+    assert resp.status_code == 200
+    resp = client.get(
+        "/api/admin/reports/revenue",
+        params={"date_from": (utcnow() - timedelta(hours=1)).isoformat()},
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200
+    row = next(item for item in resp.json()["rows"] if item["service_code"] == "photo")
+    assert row["orders"] == 0
+    assert row["refund_orders"] == 1
+    assert row["refunded_stars"] == 10

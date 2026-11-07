@@ -271,6 +271,15 @@ def test_init_data_verification(client):
     assert replay.status_code == 401
     assert replay.json()["error"]["code"] == "init_data_replayed"
 
+    reordered = "&".join(reversed(init_data.split("&")))
+    replayed_reordered = client.post(
+        "/internal/v1/initdata/verify",
+        json={"init_data": reordered},
+        headers=_headers(token),
+    )
+    assert replayed_reordered.status_code == 401
+    assert replayed_reordered.json()["error"]["code"] == "init_data_replayed"
+
     expired = _init_data(USER_ID, int(time.time()) - 10000)
     resp = client.post(
         "/internal/v1/initdata/verify", json={"init_data": expired}, headers=_headers(token)

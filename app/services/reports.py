@@ -1,6 +1,8 @@
 """Revenue and order reports."""
 from __future__ import annotations
 
+import csv
+import io
 from datetime import datetime
 
 from sqlalchemy import func, select
@@ -9,11 +11,17 @@ from sqlalchemy.orm import Session
 from app.models import Order, Service
 
 
-def _filtered(query, date_from: datetime | None, date_to: datetime | None, service_id: str | None):
+def _filtered(
+    query,
+    date_column,
+    date_from: datetime | None,
+    date_to: datetime | None,
+    service_id: str | None,
+):
     if date_from is not None:
-        query = query.where(Order.paid_at >= date_from)
+        query = query.where(date_column >= date_from)
     if date_to is not None:
-        query = query.where(Order.paid_at <= date_to)
+        query = query.where(date_column <= date_to)
     if service_id:
         query = query.where(Order.service_id == service_id)
     return query
@@ -34,6 +42,7 @@ def revenue(
             func.coalesce(func.sum(Order.platform_fee_stars), 0),
             func.coalesce(func.sum(Order.service_share_stars), 0),
         ).where(Order.status == "paid"),
+        Order.paid_at,
         date_from,
         date_to,
         service_id,
@@ -50,6 +59,7 @@ def revenue(
     refund_query = _filtered(
         select(Order.service_id, func.count(Order.id), func.coalesce(func.sum(Order.price_stars), 0))
         .where(Order.status == "refunded"),
+        Order.refunded_at,
         date_from,
         date_to,
         service_id,
@@ -93,3 +103,24 @@ def revenue(
         totals["refund_orders"] += row["refund_orders"]
         totals["refunded_stars"] += row["refunded_stars"]
     return {"rows": rows, "totals": totals}
+
+
+REVENUE_CSV_FIELDS = (
+    "service_code",
+    "service_name",
+    "orders",
+    "gross_stars",
+    "platform_fee_stars",
+    "service_share_stars",
+    "refund_orders",
+    "refunded_stars",
+)
+
+
+def revenue_csv(report: dict) -> str:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(REVENUE_CSV_FIELDS)
+    for row in report["rows"]:
+        writer.writerow([row[field] for field in REVENUE_CSV_FIELDS])
+    return buffer.getvalue()

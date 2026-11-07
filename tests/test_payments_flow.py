@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from app.db import session_scope
 from app.models import Account, Entitlement, Order, OutboxEvent, PaymentEvent, ServiceProduct, utcnow
+from tests.conftest import ADMIN_HEADERS
 from tests.helpers import (
     USER_ID,
     buy_and_pay,
@@ -222,3 +223,79 @@ def test_start_deep_links(client, fake_bot):
 
 
 OTHER_ID = 2002
+
+
+def test_stale_pending_order_bypasses_ttl_after_fix(client, fake_bot):
+    catalog = make_catalog(price=10)
+    post_update(client, callback_update(300, f"buy:{catalog['product_id']}"))
+    with session_scope() as db:
+        order = db.execute(select(Order)).scalar_one()
+        order.status = "pending"
+        order.expires_at = utcnow() - timedelta(days=2)
+        order_id = order.id
+
+    post_update(client, pre_checkout_update(301, order_id, 10))
+    assert fake_bot.calls_named("answer_pre_checkout")[-1][1][1] is False
+    assert "expired" in (fake_bot.calls_named("answer_pre_checkout")[-1][1][2] or "").lower()
+
+    post_update(client, payment_update(302, order_id, 10, "charge-stale"))
+    with session_scope() as db:
+        order = db.get(Order, order_id)
+        assert order.status == "review"
+        assert order.review_reason == "late_payment_expired"
+        assert db.execute(select(Entitlement)).scalar_one_or_none() is None
+
+
+def test_payer_mismatch_refund_uses_actual_payer(client, fake_bot):
+    catalog = make_catalog(price=10)
+    buyer = tg_user(USER_ID)
+    other = tg_user(2002, username="other")
+    post_update(client, callback_update(310, f"buy:{catalog['product_id']}", buyer))
+    with session_scope() as db:
+        order = db.execute(select(Order)).scalar_one()
+        order_id = order.id
+
+    post_update(client, payment_update(311, order_id, 10, "charge-wrong-payer", other))
+    with session_scope() as db:
+        order = db.get(Order, order_id)
+        assert order.status == "review"
+        assert order.review_reason == "payer_mismatch"
+        assert order.payment_id is None
+        event = db.execute(
+            select(PaymentEvent).where(PaymentEvent.payment_id == "charge-wrong-payer")
+        ).scalar_one()
+        assert event.payer_telegram_id == 2002
+        event_id = event.id
+
+    resp = client.post(
+        f"/api/admin/payment-events/{event_id}/refund", json={}, headers=ADMIN_HEADERS
+    )
+    assert resp.status_code == 200, resp.text
+    assert fake_bot.calls_named("refund_star_payment")[-1][1] == (2002, "charge-wrong-payer")
+
+
+def test_duplicate_charge_refundable_by_event(client, fake_bot):
+    catalog = make_catalog(price=10)
+    paid = buy_and_pay(client, catalog, charge="charge-first")
+    post_update(
+        client,
+        payment_update(320, paid["order_id"], 10, "charge-second"),
+    )
+    with session_scope() as db:
+        order = db.get(Order, paid["order_id"])
+        assert order.status == "paid"
+        assert order.payment_id == "charge-first"
+        event = db.execute(
+            select(PaymentEvent).where(PaymentEvent.payment_id == "charge-second")
+        ).scalar_one()
+        assert event.status == "duplicate_payment"
+        event_id = event.id
+
+    resp = client.post(
+        f"/api/admin/payment-events/{event_id}/refund", json={}, headers=ADMIN_HEADERS
+    )
+    assert resp.status_code == 200, resp.text
+    with session_scope() as db:
+        event = db.get(PaymentEvent, event_id)
+        assert event.refunded_at is not None
+    assert fake_bot.calls_named("refund_star_payment")[-1][1] == (USER_ID, "charge-second")

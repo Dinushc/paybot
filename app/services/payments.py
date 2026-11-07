@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app import metrics
@@ -24,6 +24,19 @@ from app.services.orders import get_order
 from app.telegram import TelegramError
 
 log = logging.getLogger("app.payments")
+
+REFUND_STALE_MINUTES = 10
+
+
+def _late_payment_allowed(order: Order, now) -> bool:
+    if order.expires_at is None:
+        return True
+    if order.expires_at >= now:
+        return True
+    return bool(
+        settings.allow_late_payment
+        and order.expires_at + timedelta(minutes=settings.late_payment_max_minutes) >= now
+    )
 
 
 def validate_pre_checkout(db: Session, query: dict) -> tuple[bool, str, str]:
@@ -54,14 +67,8 @@ def validate_pre_checkout(db: Session, query: dict) -> tuple[bool, str, str]:
     if order.status not in {"pending", "expired"}:
         return fail("err_order_not_payable")
     now = utcnow()
-    if order.status == "expired":
-        late_ok = (
-            settings.allow_late_payment
-            and order.expires_at is not None
-            and order.expires_at + timedelta(minutes=settings.late_payment_max_minutes) >= now
-        )
-        if not late_ok:
-            return fail("err_order_expired")
+    if not _late_payment_allowed(order, now):
+        return fail("err_order_expired")
     if order.telegram_user_id is not None and int(order.telegram_user_id) != int(telegram_user_id):
         return fail("err_order_not_found")
     service = db.get(Service, order.service_id)
@@ -87,6 +94,7 @@ def _record_event(
     update_id: int | None,
     status: str,
     payload: dict,
+    payer_telegram_id: int | None = None,
 ) -> PaymentEvent:
     event = PaymentEvent(
         order_id=order.id if order else None,
@@ -94,6 +102,7 @@ def _record_event(
         event_key=f"tg:{charge}" if charge else f"update:{update_id}",
         telegram_update_id=update_id,
         payment_id=charge or None,
+        payer_telegram_id=payer_telegram_id,
         status=status,
         payload=payload,
     )
@@ -132,6 +141,7 @@ def handle_successful_payment(
             update_id=update_id,
             status="unknown_order",
             payload=sp,
+            payer_telegram_id=int(from_user.get("id") or 0) or None,
         )
         outbox.enqueue_admin_alert(
             db,
@@ -153,14 +163,20 @@ def handle_successful_payment(
             update_id=update_id,
             status="broken_reference",
             payload=sp,
+            payer_telegram_id=int(from_user.get("id") or 0) or None,
         )
         order.status = "review"
         order.review_reason = "broken_reference"
+        if not order.payment_id:
+            order.payment_id = charge
+        if order.telegram_user_id is None:
+            order.telegram_user_id = int(from_user.get("id") or 0) or None
         outbox.enqueue_admin_alert(
             db,
             key="admin_payment_review",
             params={"order_id": order.id, "reason": "broken_reference"},
         )
+        outbox.enqueue_user_notification(db, account=account, key="payment_review")
         metrics.inc("payments_review", reason="broken_reference")
         return {"status": "review", "order_id": order.id, "lang": lang}
 
@@ -173,16 +189,19 @@ def handle_successful_payment(
             update_id=update_id,
             status=reason,
             payload=sp,
+            payer_telegram_id=int(from_user.get("id") or 0) or None,
         )
         order.review_reason = reason
         if order.status not in {"paid", "refunded"}:
             order.status = "review"
-        # Keep the charge on the order so support can still refund a reviewed
-        # payment through Telegram.
-        if not order.payment_id:
-            order.payment_id = charge
-        if order.telegram_user_id is None:
-            order.telegram_user_id = int(from_user.get("id") or 0) or None
+        # Attach the charge to the order only when the payer is the order owner;
+        # payer-mismatch and duplicate charges stay on the payment event so
+        # support can refund them to the actual payer.
+        if reason not in {"payer_mismatch", "duplicate_payment"}:
+            if not order.payment_id:
+                order.payment_id = charge
+            if order.telegram_user_id is None:
+                order.telegram_user_id = int(from_user.get("id") or 0) or None
         outbox.enqueue_admin_alert(
             db,
             key="admin_amount_mismatch",
@@ -215,14 +234,8 @@ def handle_successful_payment(
         return mismatch("duplicate_payment")
     if order.status not in {"pending", "expired"}:
         return mismatch("invalid_status")
-    if order.status == "expired":
-        late_ok = (
-            settings.allow_late_payment
-            and order.expires_at is not None
-            and order.expires_at + timedelta(minutes=settings.late_payment_max_minutes) >= utcnow()
-        )
-        if not late_ok:
-            return mismatch("late_payment_expired")
+    if not _late_payment_allowed(order, utcnow()):
+        return mismatch("late_payment_expired")
 
     now = utcnow()
     order.status = "paid"
@@ -243,6 +256,7 @@ def handle_successful_payment(
         update_id=update_id,
         status="paid",
         payload=sp,
+        payer_telegram_id=int(from_user.get("id") or 0) or None,
     )
     entitlement = grant_for_order(db, order=order, service=service, product=product)
 
@@ -305,11 +319,15 @@ def handle_successful_payment(
 
 
 def refund_order(
-    db: Session, *, order_id: str, bot, actor: str, telegram_user_id: int | None = None
+    db: Session,
+    *,
+    order_id: str,
+    bot,
+    actor: str,
+    telegram_user_id: int | None = None,
+    reason: str | None = None,
 ) -> dict:
-    order = db.execute(
-        select(Order).where(Order.id == order_id).with_for_update()
-    ).scalar_one_or_none()
+    order = db.get(Order, order_id)
     if order is None:
         raise NotFoundError("order not found")
     if order.status == "refunded":
@@ -325,13 +343,43 @@ def refund_order(
     payer = telegram_user_id or order.telegram_user_id
     if not payer:
         raise DomainError("missing_payer", "order has no Telegram payer", status_code=409)
+    now = utcnow()
+    stale_before = now - timedelta(minutes=REFUND_STALE_MINUTES)
+    claim = db.execute(
+        update(Order)
+        .where(
+            Order.id == order_id,
+            Order.status.in_(("paid", "review")),
+            or_(
+                Order.refund_started_at.is_(None),
+                Order.refund_started_at < stale_before,
+            ),
+        )
+        .values(refund_started_at=now)
+    )
+    if int(claim.rowcount or 0) != 1:
+        db.rollback()
+        raise DomainError("refund_in_progress", "a refund is already in progress", status_code=409)
+
     before = {
         "status": order.status,
         "payment_id": mask(order.payment_id),
+        "reason": reason,
     }
+    # The claim is committed before the network call, so no row lock is held.
+    order.refund_started_at = now
+    db.commit()
+
     try:
         bot.refund_star_payment(payer, order.payment_id)
     except TelegramError as exc:
+        db.execute(
+            update(Order)
+            .where(Order.id == order_id)
+            .values(refund_started_at=None)
+        )
+        order.refund_started_at = None
+        db.commit()
         metrics.inc("refunds_failed")
         log.error("refund failed for order %s: %s", order.id, exc)
         raise DomainError(
@@ -343,6 +391,13 @@ def refund_order(
     order.status = "refunded"
     order.refunded_at = utcnow()
     order.review_reason = None
+    # Mark the corresponding charge so it cannot be refunded a second time
+    # through the payment-event endpoint.
+    payment_event = db.execute(
+        select(PaymentEvent).where(PaymentEvent.payment_id == order.payment_id)
+    ).scalars().first()
+    if payment_event is not None and payment_event.refunded_at is None:
+        payment_event.refunded_at = order.refunded_at
     revoked = revoke_unused_for_order(db, order.id)
     outbox.add_event(
         db,
@@ -369,8 +424,13 @@ def refund_order(
         entity_type="order",
         entity_id=order.id,
         before=before,
-        after={"status": "refunded", "revoked_entitlements": [item.id for item in revoked]},
+        after={
+            "status": "refunded",
+            "revoked_entitlements": [item.id for item in revoked],
+            "reason": reason,
+        },
     )
+    db.commit()
     metrics.inc("refunds_succeeded")
     log.info(
         "order refunded",
@@ -380,4 +440,113 @@ def refund_order(
         "order_id": order.id,
         "status": order.status,
         "revoked_entitlements": [item.id for item in revoked],
+    }
+
+
+REFUNDABLE_EVENT_STATUSES = {
+    "unknown_order",
+    "amount_mismatch",
+    "currency_mismatch",
+    "payer_mismatch",
+    "user_blocked",
+    "broken_reference",
+    "duplicate_payment",
+    "late_payment_expired",
+    "invalid_status",
+}
+
+
+def refund_payment_event(
+    db: Session, *, event_id: str, bot, actor: str, reason: str | None = None
+) -> dict:
+    event = db.get(PaymentEvent, event_id)
+    if event is None:
+        raise NotFoundError("payment event not found")
+    if event.refunded_at is not None:
+        raise DomainError("already_refunded", "payment is already refunded", status_code=409)
+    if not event.payment_id:
+        raise DomainError("missing_payment", "payment event has no charge id", status_code=409)
+    if event.status not in REFUNDABLE_EVENT_STATUSES:
+        raise DomainError(
+            "payment_not_refundable",
+            "only review/duplicate charges can be refunded via the payment event",
+            status_code=409,
+        )
+    order = db.get(Order, event.order_id) if event.order_id else None
+    if (
+        order is not None
+        and order.payment_id == event.payment_id
+        and order.status in {"paid", "review"}
+    ):
+        raise DomainError(
+            "use_order_refund",
+            "this charge is attached to an order; refund the order instead",
+            status_code=409,
+        )
+    payer = event.payer_telegram_id or (order.telegram_user_id if order else None)
+    if not payer:
+        raise DomainError("missing_payer", "payment event has no payer", status_code=409)
+    now = utcnow()
+    stale_before = now - timedelta(minutes=REFUND_STALE_MINUTES)
+    claim = db.execute(
+        update(PaymentEvent)
+        .where(
+            PaymentEvent.id == event_id,
+            PaymentEvent.refunded_at.is_(None),
+            or_(
+                PaymentEvent.refund_started_at.is_(None),
+                PaymentEvent.refund_started_at < stale_before,
+            ),
+        )
+        .values(refund_started_at=now)
+    )
+    if int(claim.rowcount or 0) != 1:
+        db.rollback()
+        raise DomainError("refund_in_progress", "a refund is already in progress", status_code=409)
+    event.refund_started_at = now
+    db.commit()
+
+    try:
+        bot.refund_star_payment(payer, event.payment_id)
+    except TelegramError as exc:
+        db.execute(
+            update(PaymentEvent)
+            .where(PaymentEvent.id == event_id)
+            .values(refund_started_at=None)
+        )
+        event.refund_started_at = None
+        db.commit()
+        metrics.inc("refunds_failed")
+        raise DomainError(
+            "telegram_refund_failed",
+            "Telegram did not confirm the refund",
+            status_code=502,
+        ) from exc
+
+    event.refunded_at = utcnow()
+    db.flush()
+    audit.write_audit(
+        db,
+        actor=actor,
+        action="payment_event.refund",
+        entity_type="payment_event",
+        entity_id=event.id,
+        before={"payment_id": mask(event.payment_id), "status": event.status, "reason": reason},
+        after={"refunded_at": event.refunded_at.isoformat(), "reason": reason},
+    )
+    db.commit()
+    metrics.inc("refunds_succeeded")
+    log.info(
+        "payment event refunded",
+        extra={
+            "order_id": event.order_id,
+            "status": "refunded",
+            "charge_id": mask(event.payment_id),
+        },
+    )
+    return {
+        "event_id": event.id,
+        "order_id": event.order_id,
+        "payment_id": event.payment_id,
+        "refunded_at": event.refunded_at.isoformat(),
     }

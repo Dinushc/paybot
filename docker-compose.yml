@@ -14,10 +14,9 @@ services:
       retries: 20
     restart: unless-stopped
 
-  app:
+  migrate:
     build: .
-    ports:
-      - "8000:8000"
+    command: ["alembic", "upgrade", "head"]
     environment: &env
       DATABASE_URL: postgresql+psycopg://paybot:paybot@db:5432/paybot
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL must be set}
@@ -26,7 +25,7 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
       TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
-      TELEGRAM_AUTO_SETUP: ${TELEGRAM_AUTO_SETUP:-1}
+      TELEGRAM_AUTO_SETUP: "0"
       ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-}
       ADMIN_CHAT_ID: ${ADMIN_CHAT_ID:-}
       SUPPORT_EMAIL: ${SUPPORT_EMAIL:-}
@@ -39,6 +38,20 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    restart: "no"
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *env
+      TELEGRAM_AUTO_SETUP: ${TELEGRAM_AUTO_SETUP:-1}
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   worker:
@@ -51,8 +64,12 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       app:
         condition: service_healthy
+    healthcheck:
+      disable: true
     restart: unless-stopped
 
 volumes:

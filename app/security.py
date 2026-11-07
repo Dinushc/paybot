@@ -93,6 +93,15 @@ def new_csrf_token() -> str:
     return secrets.token_urlsafe(24)
 
 
+def init_data_replay_key(init_data: str) -> str:
+    """Canonical digest for replay protection, independent of parameter order."""
+    pairs = parse_qsl(init_data, keep_blank_values=True)
+    data = dict(pairs)
+    data.pop("hash", None)
+    check_string = "\n".join(f"{key}={value}" for key, value in sorted(data.items()))
+    return sha256_hex(check_string)
+
+
 def validate_init_data(
     init_data: str, bot_token: str | None = None, ttl_seconds: int | None = None
 ) -> dict:

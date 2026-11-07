@@ -57,8 +57,8 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "orders:read",
         "orders:refund",
         "entitlements:read",
+        "payments:read",
         "users:read",
-        "users:anonymize",
         "audit:read",
     },
     "finance": {

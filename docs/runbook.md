@@ -6,7 +6,7 @@
 ## 1. Деплой
 
 ```bash
-alembic upgrade head
+alembic upgrade head        # один раз, отдельным job/init-контейнером
 # задеплоить приложение
 curl -fsS "$PUBLIC_BASE_URL/healthz"
 curl -fsS "$PUBLIC_BASE_URL/readyz"
@@ -16,7 +16,7 @@ curl -fsS "$PUBLIC_BASE_URL/metrics" | head
 Порядок:
 
 1. Бэкап БД.
-2. `alembic upgrade head`.
+2. `alembic upgrade head` один раз (в compose — сервис `migrate`).
 3. Выкатить API (`WORKERS_ENABLED=0`, если воркер отдельный процесс).
 4. Выкатить/перезапустить worker.
 5. Проверить `/healthz`, `/readyz`.
@@ -97,7 +97,10 @@ curl -sS "$PUBLIC_BASE_URL/api/admin/orders?payment_id=$CHARGE" \
    использованный не отзывается автоматически.
 4. Ошибка Telegram (`502 telegram_refund_failed`): заказ остаётся `paid`,
    доступ не меняется — повторить позже. Проверить баланс бота в Telegram.
-5. Частичных возвратов Stars через Bot API нет. Для компенсации использовать
+5. Дублирующие/спорные списания, не привязанные к заказу, возвращаются через
+   `POST /api/admin/payment-events/{id}/refund` (в получателе используется
+   фактический payer из платёжного события).
+6. Частичных возвратов Stars через Bot API нет. Для компенсации использовать
    ручное начисление/списание entitlement и зафиксировать решение в аудите.
 
 ## 5. Outbox

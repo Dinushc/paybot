@@ -121,6 +121,26 @@ def test_rbac_roles_and_service_scope(client):
     assert resp.status_code == 200
     assert resp.json()["name"] == "Renamed"
 
+    resp = client.patch(
+        f"/api/admin/services/{catalog['service_id']}",
+        json={"platform_fee_bps": 0},
+        headers=service_admin,
+    )
+    assert resp.status_code == 403
+
+    resp = client.patch(
+        f"/api/admin/services/{catalog['service_id']}",
+        json={"status": "disabled"},
+        headers=service_admin,
+    )
+    assert resp.status_code == 403
+
+    from tests.helpers import make_account
+
+    account_id = make_account()
+    resp = client.post(f"/api/admin/users/{account_id}/anonymize", headers=support)
+    assert resp.status_code == 403
+
 
 def test_service_token_issuance_and_revocation(client):
     catalog = make_catalog()
@@ -184,19 +204,30 @@ def test_account_anonymization(client):
     from tests.helpers import make_account
 
     account_id = make_account()
+    with session_scope() as db:
+        from app.models import Account
+
+        account = db.get(Account, account_id)
+        account.name = "Private Name"
+        account.email = "private@example.com"
     resp = client.post(
         f"/api/admin/users/{account_id}/anonymize", headers=ADMIN_HEADERS
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["anonymized"] is True
     with session_scope() as db:
-        from app.models import Account
+        from app.models import Account, AuditLog
 
         account = db.get(Account, account_id)
         assert account.email is None
         assert account.name is None
         assert account.is_blocked is True
         assert account.deleted_at is not None
+        entry = db.execute(
+            select(AuditLog).where(AuditLog.action == "account.anonymize")
+        ).scalar_one()
+        assert "Private Name" not in str(entry.before)
+        assert "private@example.com" not in str(entry.before)
 
 
 def test_entitlement_adjust_and_audit(client):
@@ -227,3 +258,28 @@ def test_entitlement_adjust_and_audit(client):
         headers=ADMIN_HEADERS,
     )
     assert resp.status_code == 422
+
+
+def test_adjust_expired_entitlement_reactivates_without_expiry(client):
+    from app.models import Entitlement
+    from datetime import timedelta
+
+    from app.models import utcnow
+    from tests.helpers import grant_access, make_account
+
+    catalog = make_catalog(quantity=1)
+    account_id = make_account()
+    granted = grant_access(account_id, catalog, expires_at=utcnow() - timedelta(minutes=1))
+    resp = client.post(
+        f"/api/admin/entitlements/{granted['entitlement_id']}/adjust",
+        json={"delta": 1, "reason": "support grant"},
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["remaining"] == 2
+    assert resp.json()["status"] == "active"
+    assert resp.json()["expires_at"] is None
+    with session_scope() as db:
+        entitlement = db.get(Entitlement, granted["entitlement_id"])
+        assert entitlement.expires_at is None
+        assert entitlement.status == "active"

@@ -79,8 +79,17 @@ def test_production_config_guard():
         secret_key="x" * 48,
         telegram_bot_token="123:abc",
         telegram_webhook_secret="secret",
+        auto_create_tables=False,
     )
     assert secure.fatal_problems() == []
+
+    placeholder = replace(
+        secure, secret_key="change-me-change-me-change-me-change-me"
+    )
+    assert any("SECRET_KEY" in item for item in placeholder.fatal_problems())
+
+    auto_create = replace(secure, auto_create_tables=True)
+    assert any("AUTO_CREATE_TABLES" in item for item in auto_create.fatal_problems())
 
 
 def test_outbox_notification_and_retry(client, fake_bot):
@@ -272,3 +281,62 @@ def test_admin_ui_login_and_csrf(client):
         assert resp.status_code == 200, (path, resp.text[:200])
     resp = client.get("/admin/logout", follow_redirects=False)
     assert resp.status_code == 303
+
+
+def test_admin_ui_hides_events_secret_from_support(client):
+    from app.db import session_scope
+    from app.models import Service
+    from app.services.admin_access import create_admin_key
+    from tests.helpers import make_catalog
+
+    catalog = make_catalog()
+    with session_scope() as db:
+        service = db.get(Service, catalog["service_id"])
+        service.events_secret = "super-secret-signing-key"
+        _, token = create_admin_key(db, name="support-ui", role="support")
+
+    resp = client.post("/admin/login", data={"token": token}, follow_redirects=False)
+    assert resp.status_code == 303
+    page = client.get(f"/admin/services/{catalog['service_id']}")
+    assert page.status_code == 200
+    assert "super-secret-signing-key" not in page.text
+    assert "configured" in page.text
+
+
+def test_outbox_generic_failure_alerts_admin(client, fake_bot):
+    catalog = make_catalog()
+    from app.services import outbox as outbox_module
+    from app.models import OutboxEvent
+
+    with session_scope() as db:
+        service = db.get(Service, catalog["service_id"])
+        service.events_url = "https://service.example/events"
+        event = outbox_module.add_event(
+            db,
+            event_type="order.paid",
+            aggregate_id="agg",
+            service_id=service.id,
+            payload={},
+        )
+        event.attempts = settings.outbox_max_attempts - 1
+        event_id = event.id
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("unexpected failure")
+
+    original = outbox_module.httpx.post
+    outbox_module.httpx.post = boom
+    try:
+        with session_scope() as db:
+            stats = outbox_module.dispatch_once(db, fake_bot)
+    finally:
+        outbox_module.httpx.post = original
+    assert stats["dead"] == 1
+    with session_scope() as db:
+        assert db.get(OutboxEvent, event_id).status == "dead"
+        alerts = [
+            item
+            for item in db.execute(select(OutboxEvent)).scalars()
+            if item.payload.get("key") == "admin_outbox_dead"
+        ]
+        assert alerts

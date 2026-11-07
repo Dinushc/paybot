@@ -274,16 +274,29 @@ def expire_entitlements(db: Session) -> int:
     from app.services.catalog import service_name
 
     now = utcnow()
-    entitlements = list(
-        db.execute(
-            select(Entitlement).where(
-                Entitlement.status == "active",
-                Entitlement.expires_at.is_not(None),
-                Entitlement.expires_at <= now,
-            )
-        ).scalars()
+    query = (
+        select(Entitlement)
+        .where(
+            Entitlement.status == "active",
+            Entitlement.expires_at.is_not(None),
+            Entitlement.expires_at <= now,
+        )
+        .order_by(Entitlement.id)
+        .limit(500)
     )
-    for entitlement in entitlements:
+    dialect = db.bind.dialect.name if db.bind is not None else ""
+    if dialect != "sqlite":
+        query = query.with_for_update(skip_locked=True)
+    candidates = list(db.execute(query).scalars())
+    processed = 0
+    for entitlement in candidates:
+        if (
+            entitlement.status != "active"
+            or entitlement.expires_at is None
+            or entitlement.expires_at > now
+        ):
+            continue
+        processed += 1
         if entitlement.remaining > 0:
             db.add(
                 EntitlementLedger(
@@ -306,7 +319,7 @@ def expire_entitlements(db: Session) -> int:
                 key="access_expired",
                 params={"service": service_name(service, account.locale)},
             )
-    return len(entitlements)
+    return processed
 
 
 def revoke_unused_for_order(db: Session, order_id: str) -> list[Entitlement]:
@@ -362,6 +375,9 @@ def adjust(
     if new_remaining < 0:
         raise ValidationError("adjustment would make remaining negative")
     entitlement.remaining = new_remaining
+    if new_remaining > 0 and entitlement.expires_at is not None:
+        if entitlement.expires_at <= utcnow():
+            entitlement.expires_at = None
     if new_remaining == 0:
         entitlement.status = "exhausted"
     elif entitlement.status in {"exhausted", "expired"}:

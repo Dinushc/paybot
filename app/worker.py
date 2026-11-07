@@ -71,7 +71,7 @@ class Worker(threading.Thread):
             if expired:
                 metrics.inc("entitlements_expired", expired)
                 log.info("expired %s entitlements", expired)
-        if self._due("cleanup", 24 * 60 * 60):
+        if self._due("cleanup", 60 * 60):
             with session_scope() as db:
                 removed = _cleanup_init_data(db)
             if removed:
@@ -98,15 +98,38 @@ class Worker(threading.Thread):
 
 
 def _cleanup_init_data(db) -> int:
-    from sqlalchemy import delete
+    from sqlalchemy import delete, select
 
-    removed = db.execute(
-        delete(InitDataUse).where(InitDataUse.used_at < utcnow() - timedelta(days=1))
-    )
-    old_updates = db.execute(
-        delete(BotUpdate).where(BotUpdate.created_at < utcnow() - timedelta(days=30))
-    )
-    return int((removed.rowcount or 0) + (old_updates.rowcount or 0))
+    removed = 0
+    for _ in range(10):
+        init_digests = list(
+            db.execute(
+                select(InitDataUse.digest)
+                .where(InitDataUse.used_at < utcnow() - timedelta(days=1))
+                .limit(1000)
+            ).scalars()
+        )
+        update_ids = list(
+            db.execute(
+                select(BotUpdate.update_id)
+                .where(BotUpdate.created_at < utcnow() - timedelta(days=30))
+                .limit(1000)
+            ).scalars()
+        )
+        if not init_digests and not update_ids:
+            break
+        if init_digests:
+            result = db.execute(
+                delete(InitDataUse).where(InitDataUse.digest.in_(init_digests))
+            )
+            removed += int(result.rowcount or 0)
+        if update_ids:
+            result = db.execute(
+                delete(BotUpdate).where(BotUpdate.update_id.in_(update_ids))
+            )
+            removed += int(result.rowcount or 0)
+        db.commit()
+    return removed
 
 
 def run_jobs_once() -> dict:
